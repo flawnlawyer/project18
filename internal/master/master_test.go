@@ -2,6 +2,7 @@ package master
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -221,5 +222,55 @@ func TestKilledMasterRejectsOperations(t *testing.T) {
 	}
 	if _, _, err := h.m.AllocateChunk("/f"); err == nil {
 		t.Fatal("expected error from killed master")
+	}
+}
+
+// TestPlacementIsDeterministicAcrossRuns is the M1 regression test for the
+// determinism bug fixed in this milestone: candidate lists were built by
+// iterating Go maps (server registry, failure-detector's known-servers,
+// chunk metadata's location set), whose iteration order is randomized
+// per-process. That fed a randomized draw order into the placement
+// policy's single shared *rand.Rand, so identical seeds produced different
+// placements across runs. Every such site now sorts before returning.
+func TestPlacementIsDeterministicAcrossRuns(t *testing.T) {
+	// Capture full placement for two independent runs with identical
+	// config/seed, and compare every chunk's locations.
+	type run struct {
+		locations map[common.ChunkHandle][]common.ServerID
+	}
+	doRun := func() run {
+		cfg := DefaultConfig()
+		cfg.ReplicationFactor = 3
+		cfg.PlacementSeed = 42
+		h := newHarness(t, 8, cfg)
+		if err := h.m.CreateFile("/f"); err != nil {
+			t.Fatal(err)
+		}
+		locs := make(map[common.ChunkHandle][]common.ServerID)
+		for i := 0; i < 20; i++ {
+			handle, locations, err := h.m.AllocateChunk("/f")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sorted := append([]common.ServerID(nil), locations...)
+			sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+			locs[handle] = sorted
+		}
+		return run{locations: locs}
+	}
+
+	a := doRun()
+	b := doRun()
+	if len(a.locations) != len(b.locations) {
+		t.Fatalf("run lengths differ: %d vs %d", len(a.locations), len(b.locations))
+	}
+	for handle, locA := range a.locations {
+		locB, ok := b.locations[handle]
+		if !ok {
+			t.Fatalf("chunk %s missing from second run", handle)
+		}
+		if fmt.Sprint(locA) != fmt.Sprint(locB) {
+			t.Fatalf("chunk %s placement differs across runs with the same seed: %v vs %v", handle, locA, locB)
+		}
 	}
 }
