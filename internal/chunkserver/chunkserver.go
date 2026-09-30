@@ -7,6 +7,7 @@ package chunkserver
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"project18/internal/common"
@@ -133,6 +134,10 @@ func (cs *ChunkServer) ChunkHandles() []common.ChunkHandle {
 	for h := range cs.chunks {
 		out = append(out, h)
 	}
+	// M1: deterministic order (map iteration is randomized per-process) so
+	// heartbeat report order — and therefore event-log order — is
+	// reproducible across runs with the same seed.
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
 

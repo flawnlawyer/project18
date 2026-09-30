@@ -1,6 +1,7 @@
 package master
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -97,5 +98,7 @@ func (d *HeartbeatFailureDetector) KnownServers() []common.ServerID {
 	for s := range d.last {
 		out = append(out, s)
 	}
+	// M1: deterministic order — see AllChunkHandles for why this matters.
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
