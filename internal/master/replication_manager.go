@@ -1,6 +1,8 @@
 package master
 
 import (
+	"sort"
+	"sync/atomic"
 	"time"
 
 	"project18/internal/chunkserver"
@@ -37,7 +39,18 @@ type GFSReplicationManager struct {
 	log       *events.Log
 	metrics   *metrics.Metrics
 	masterID  common.ServerID
+
+	// unresolved is the number of chunks still below the replication target
+	// (per the failure detector) at the END of the most recent pass. Added in
+	// M1: CheckAndSchedule's return value counts chunks that needed repair
+	// when scanned, whether or not the repair then succeeded, so it can't be
+	// used to tell when recovery actually finished.
+	unresolved atomic.Int64
 }
+
+// Unresolved reports how many chunks were still under-replicated after the
+// most recent CheckAndSchedule pass.
+func (rm *GFSReplicationManager) Unresolved() int { return int(rm.unresolved.Load()) }
 
 func NewGFSReplicationManager(target int, meta MetadataStore, fd FailureDetector, placement ReplicaPlacementPolicy, nodes NodeLookup, net *network.InProcessNetwork, log *events.Log, m *metrics.Metrics, masterID common.ServerID) *GFSReplicationManager {
 	return &GFSReplicationManager{
@@ -63,6 +76,12 @@ func (rm *GFSReplicationManager) CheckAndSchedule(now time.Time) int {
 				dead = append(dead, server)
 			}
 		}
+		// M1: deterministic order — alive[0] is used as the re-replication
+		// source below, so unordered map iteration here would make source
+		// selection (and therefore which server absorbs the read load)
+		// non-reproducible across runs with the same seed.
+		sort.Slice(alive, func(i, j int) bool { return alive[i] < alive[j] })
+		sort.Slice(dead, func(i, j int) bool { return dead[i] < dead[j] })
 
 		// Drop dead replicas from the metadata's location set — they no
 		// longer count toward replication factor.
@@ -96,6 +115,9 @@ func (rm *GFSReplicationManager) CheckAndSchedule(now time.Time) int {
 				rm.metrics.IncReReplicationFailed()
 			}
 			continue
+		}
+		if rm.metrics != nil {
+			rm.metrics.IncPlacementDecision()
 		}
 
 		source, ok := rm.nodes(alive[0])
@@ -144,6 +166,24 @@ func (rm *GFSReplicationManager) CheckAndSchedule(now time.Time) int {
 	if rm.metrics != nil {
 		rm.metrics.SetUnderReplicated(uint64(underReplicated))
 	}
+
+	stillUnder := 0
+	for _, handle := range rm.meta.AllChunkHandles() {
+		cm, ok := rm.meta.GetChunkMeta(handle)
+		if !ok {
+			continue
+		}
+		live := 0
+		for server := range cm.Locations {
+			if rm.fd.IsAlive(server) {
+				live++
+			}
+		}
+		if live < rm.target {
+			stillUnder++
+		}
+	}
+	rm.unresolved.Store(int64(stillUnder))
 	return underReplicated
 }
 

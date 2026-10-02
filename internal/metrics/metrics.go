@@ -28,6 +28,8 @@ type Metrics struct {
 	MasterMetadataOps uint64
 	MessagesSent      uint64
 
+	PlacementDecisions uint64 // M1: number of times ReplicaPlacementPolicy.Choose was invoked successfully (initial allocation + re-replication)
+
 	FailureDetections uint64
 	detectionSamples  []time.Duration // heartbeat-timeout -> detection latency
 	recoverySamples   []time.Duration // failure -> replication-restored latency
@@ -67,6 +69,7 @@ func (m *Metrics) IncReReplicationOK()     { m.mu.Lock(); m.ReReplicationsOK++; 
 func (m *Metrics) IncReReplicationFailed() { m.mu.Lock(); m.ReReplicationsFailed++; m.mu.Unlock() }
 func (m *Metrics) IncMasterOp()            { m.mu.Lock(); m.MasterMetadataOps++; m.mu.Unlock() }
 func (m *Metrics) IncMessage()             { m.mu.Lock(); m.MessagesSent++; m.mu.Unlock() }
+func (m *Metrics) IncPlacementDecision()   { m.mu.Lock(); m.PlacementDecisions++; m.mu.Unlock() }
 
 func (m *Metrics) RecordDetection(d time.Duration) {
 	m.mu.Lock()
@@ -92,9 +95,11 @@ type Snapshot struct {
 	ReReplicationsFailed       uint64
 	MasterMetadataOps          uint64
 	MessagesSent               uint64
+	PlacementDecisions         uint64
 	FailureDetections          uint64
 	AvgDetectionLatency        time.Duration
 	AvgRecoveryLatency         time.Duration
+	RecoveryIncidents          uint64
 }
 
 func avg(samples []time.Duration) time.Duration {
@@ -121,19 +126,21 @@ func (m *Metrics) Snapshot() Snapshot {
 		ReReplicationsFailed:  m.ReReplicationsFailed,
 		MasterMetadataOps:     m.MasterMetadataOps,
 		MessagesSent:          m.MessagesSent,
+		PlacementDecisions:    m.PlacementDecisions,
 		FailureDetections:     m.FailureDetections,
 		AvgDetectionLatency:   avg(m.detectionSamples),
 		AvgRecoveryLatency:    avg(m.recoverySamples),
+		RecoveryIncidents:     uint64(len(m.recoverySamples)),
 	}
 }
 
 func (s Snapshot) String() string {
 	return fmt.Sprintf(
-		"reads=%d/%d writes=%d/%d under-replicated=%d stale=%d re-repl(start/ok/fail)=%d/%d/%d master-ops=%d messages=%d detections=%d avg-detect=%v avg-recover=%v",
+		"reads=%d/%d writes=%d/%d under-replicated=%d stale=%d re-repl(start/ok/fail)=%d/%d/%d master-ops=%d messages=%d placement-decisions=%d detections=%d avg-detect=%v avg-recover=%v",
 		s.ReadSuccess, s.ReadFailure, s.WriteSuccess, s.WriteFailure,
 		s.UnderReplicatedChunks, s.StaleReplicasDetected,
 		s.ReReplicationsStarted, s.ReReplicationsOK, s.ReReplicationsFailed,
-		s.MasterMetadataOps, s.MessagesSent, s.FailureDetections,
+		s.MasterMetadataOps, s.MessagesSent, s.PlacementDecisions, s.FailureDetections,
 		s.AvgDetectionLatency, s.AvgRecoveryLatency,
 	)
 }
