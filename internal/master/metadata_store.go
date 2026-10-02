@@ -2,6 +2,7 @@ package master
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"project18/internal/common"
@@ -171,6 +172,11 @@ func (s *InMemoryMetadataStore) AllChunkHandles() []common.ChunkHandle {
 	for h := range s.chunks {
 		out = append(out, h)
 	}
+	// M1: map iteration order is randomized per-process; sorting makes
+	// chunk-processing order (and therefore RNG draw order in the shared
+	// placement policy) reproducible for a given seed. See
+	// docs/experiments/M1-replica-placement.md.
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
 

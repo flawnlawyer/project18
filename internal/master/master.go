@@ -9,6 +9,7 @@ package master
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -65,10 +66,14 @@ type Master struct {
 	lastCheckpoint       CheckpointRecord
 	ticksSinceCheckpoint int
 
-	// pendingFailureSince tracks, per server, when its heartbeat gap started
-	// being observed dead-but-not-yet-scanned — used only to produce a
-	// meaningful "detection latency" metric.
-	pendingFailureSince map[common.ServerID]time.Time
+	// recoveryPending/recoveryStart bracket one failure-to-full-recovery
+	// incident: set when a failure is first detected while no incident is
+	// already open, cleared (and timed) once CheckAndSchedule reports zero
+	// under-replicated chunks again. Feeds Metrics.RecordRecovery — see
+	// docs/experiments/M1-replica-placement.md for why this was previously
+	// declared but never wired up.
+	recoveryPending bool
+	recoveryStart   time.Time
 }
 
 func NewMaster(id common.ServerID, net *network.InProcessNetwork, log *events.Log, m *metrics.Metrics, cfg Config) *Master {
@@ -78,20 +83,19 @@ func NewMaster(id common.ServerID, net *network.InProcessNetwork, log *events.Lo
 	placement := NewGFSReplicaPlacementPolicy(cfg.PlacementSeed)
 
 	master := &Master{
-		id:                  id,
-		cfg:                 cfg,
-		alive:               true,
-		nodes:               make(map[common.ServerID]chunkserver.StorageNode),
-		meta:                meta,
-		fd:                  fd,
-		leases:              leases,
-		placement:           placement,
-		net:                 net,
-		log:                 log,
-		metrics:             m,
-		clock:               common.RealClock{},
-		opLog:               NewOperationLog(),
-		pendingFailureSince: make(map[common.ServerID]time.Time),
+		id:        id,
+		cfg:       cfg,
+		alive:     true,
+		nodes:     make(map[common.ServerID]chunkserver.StorageNode),
+		meta:      meta,
+		fd:        fd,
+		leases:    leases,
+		placement: placement,
+		net:       net,
+		log:       log,
+		metrics:   m,
+		clock:     common.RealClock{},
+		opLog:     NewOperationLog(),
 	}
 	master.replication = NewGFSReplicationManager(cfg.ReplicationFactor, meta, fd, placement, master.lookupNode, net, log, m, id)
 	master.scheduler = NewPeriodicScheduler(cfg.HeartbeatTimeout/2, master.backgroundTick)
@@ -142,7 +146,18 @@ func (m *Master) onlineServerIDs() []common.ServerID {
 			out = append(out, id)
 		}
 	}
+	// M1: deterministic order for reproducible experiments — see
+	// AllChunkHandles in metadata_store.go for the full rationale.
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// IsServerAlive reports whether the master currently believes server is
+// alive (per its FailureDetector). Exposed read-only for the M1 experiment
+// layer to time failure detection precisely, without giving experiments
+// write access to master internals.
+func (m *Master) IsServerAlive(server common.ServerID) bool {
+	return m.fd.IsAlive(server)
 }
 
 // --- Client-facing operations ---
@@ -184,6 +199,9 @@ func (m *Master) AllocateChunk(path common.Path) (common.ChunkHandle, []common.S
 	}
 	m.opLog.Append(Operation{Type: OpAppendChunk, Path: path, Handle: handle})
 	m.metrics.IncMasterOp()
+	if m.metrics != nil {
+		m.metrics.IncPlacementDecision()
+	}
 
 	m.log.Logf("MASTER", "allocated chunk %s for %s", handle, path)
 	m.log.Logf("MASTER", "selected replicas %v for %s", locations, handle)
@@ -214,6 +232,7 @@ func (m *Master) GetChunkLocations(path common.Path, index int) (common.ChunkHan
 			alive = append(alive, server)
 		}
 	}
+	sort.Slice(alive, func(i, j int) bool { return alive[i] < alive[j] })
 	m.metrics.IncMasterOp()
 	return handle, alive, nil
 }
@@ -246,6 +265,7 @@ func (m *Master) RequestLease(handle common.ChunkHandle) (LeaseInfo, error) {
 			alive = append(alive, server)
 		}
 	}
+	sort.Slice(alive, func(i, j int) bool { return alive[i] < alive[j] })
 	if len(alive) == 0 {
 		return LeaseInfo{}, fmt.Errorf("%s has no alive replicas — cannot grant lease", handle)
 	}
@@ -312,6 +332,10 @@ func (m *Master) backgroundTick() {
 		if m.metrics != nil {
 			m.metrics.RecordDetection(now.Sub(last))
 		}
+		if !m.recoveryPending {
+			m.recoveryPending = true
+			m.recoveryStart = now
+		}
 		if affected := m.leases.RevokeForServer(server); len(affected) > 0 {
 			m.log.Logf("MASTER", "revoked leases for %v (primary %s failed)", affected, server)
 		}
@@ -320,6 +344,18 @@ func (m *Master) backgroundTick() {
 	underReplicated := m.replication.CheckAndSchedule(now)
 	if underReplicated == 0 && len(dead) > 0 {
 		m.log.Logf("MASTER", "replication fully restored, 0 under-replicated chunks")
+	}
+	resolved := underReplicated
+	if r, ok := m.replication.(interface{ Unresolved() int }); ok {
+		resolved = r.Unresolved()
+	}
+	if resolved == 0 && m.recoveryPending {
+		duration := now.Sub(m.recoveryStart)
+		if m.metrics != nil {
+			m.metrics.RecordRecovery(duration)
+		}
+		m.log.Logf("MASTER", "recovery complete: %v since first failure detection", duration)
+		m.recoveryPending = false
 	}
 
 	m.ticksSinceCheckpoint++
