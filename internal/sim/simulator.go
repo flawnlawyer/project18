@@ -36,6 +36,19 @@ type Simulator struct {
 // New builds a simulator with numServers chunkservers, each with the given
 // capacity (bytes), running under cfg.
 func New(numServers int, capacityPerServer uint64, cfg master.Config) *Simulator {
+	capacities := make([]uint64, numServers)
+	for i := range capacities {
+		capacities[i] = capacityPerServer
+	}
+	return NewWithCapacities(capacities, cfg)
+}
+
+// NewWithCapacities builds a simulator with one chunkserver per entry in
+// capacities (CS1..CSn, in order), each given that entry's capacity in
+// bytes. Added for M1 Experiment B (uneven cluster conditions) — New is
+// unchanged and just calls this with a uniform slice, so no M0 behavior
+// changes.
+func NewWithCapacities(capacities []uint64, cfg master.Config) *Simulator {
 	log := events.NewLog()
 	met := metrics.New()
 	net := network.NewInProcessNetwork(met)
@@ -47,9 +60,9 @@ func New(numServers int, capacityPerServer uint64, cfg master.Config) *Simulator
 		clock: common.RealClock{},
 	}
 
-	for i := 1; i <= numServers; i++ {
-		id := common.ServerID(fmt.Sprintf("CS%d", i))
-		cs := chunkserver.New(id, capacityPerServer, log)
+	for i, capacity := range capacities {
+		id := common.ServerID(fmt.Sprintf("CS%d", i+1))
+		cs := chunkserver.New(id, capacity, log)
 		s.nodes[id] = cs
 		s.order = append(s.order, id)
 		m.RegisterChunkServer(cs)
@@ -199,4 +212,27 @@ func (s *Simulator) ServerIDs() []common.ServerID {
 	out := make([]common.ServerID, len(s.order))
 	copy(out, s.order)
 	return out
+}
+
+// AllocateChunkWithData allocates a new chunk for path via the master (so
+// placement goes through the normal policy) and immediately stores data on
+// every chosen initial replica, bypassing Client's byte-splitting. Used by
+// the M1 experiment layer, which needs exact control over chunk *count*
+// independent of payload size, while still leaving real bytes on disk so
+// later re-replication has something to read.
+func (s *Simulator) AllocateChunkWithData(path common.Path, data []byte) (common.ChunkHandle, []common.ServerID, error) {
+	handle, locations, err := s.Master.AllocateChunk(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, loc := range locations {
+		node, ok := s.nodes[loc]
+		if !ok {
+			continue
+		}
+		if err := node.StoreChunk(handle, 1, data); err != nil {
+			return handle, locations, fmt.Errorf("store initial replica on %s: %w", loc, err)
+		}
+	}
+	return handle, locations, nil
 }
