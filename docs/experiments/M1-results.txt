@@ -1,0 +1,93 @@
+
+Experiment A: baseline distribution (seed=1 detail, then spread across seeds)
+=============================================================================
+chunks=120; replicas/node figures are per-node counts; imbalance = max-min
+
+nodes  RF  | min    max    mean     imbalance stddev   | imbalance over seeds 1..10 (min/mean/max)
+3      2   | 73     84     80.00    11        4.97     | 2 / 10.9 / 19
+3      3   | 120    120    120.00   0         0.00     | 0 / 0.0 / 0
+5      2   | 41     55     48.00    14        4.94     | 6 / 13.7 / 18
+5      3   | 62     80     72.00    18        6.81     | 5 / 14.1 / 22
+10     2   | 16     33     24.00    17        5.27     | 11 / 14.9 / 19
+10     3   | 23     41     36.00    18        5.22     | 13 / 16.7 / 23
+
+seed=1 per-node detail (nodes=10, RF=3):
+  total=360 min=23 max=41 mean=36.00 imbalance=18 stddev=5.22 | CS1=40 CS10=41 CS2=40 CS3=38 CS4=23 CS5=33 CS6=34 CS7=40 CS8=33 CS9=38
+  placement decisions recorded: 120
+
+Experiment B: uneven cluster conditions
+=======================================
+
+B1: capacity awareness (5 nodes, RF=3, 60 chunks x 16B; CS1,CS2 capacity=64B (4 chunks), others 1MiB)
+  distribution (physically stored): total=111 min=4 max=37 mean=22.20 imbalance=33 stddev=14.99 | CS1=4 CS2=4 CS3=35 CS4=37 CS5=31
+  chunks where a chosen replica could not physically fit: 51 of 60; nodes that overflowed: [CS1 CS2]
+  after 3 heartbeat ticks: chunks whose master-listed replicas include a node that does not hold them: 51 of 60 (69 phantom replicas); chunks the master considers under-replicated: 0
+  client read of the whole file succeeded: false read C5 from CS1: chunkserver CS1: no such chunk C5
+
+B2: load awareness (CS1 pre-loaded with 500 unrelated chunks, then 60 fresh chunks allocated)
+  before: total=500 min=0 max=500 mean=100.00 imbalance=500 stddev=200.00 | CS1=500 CS2=0 CS3=0 CS4=0 CS5=0
+  after:  total=680 min=31 max=542 mean=136.00 imbalance=511 stddev=203.01 | CS1=542 CS2=35 CS3=35 CS4=37 CS5=31
+  new replicas received by pre-loaded CS1: 42 (expected share if load-blind: ~36)
+  across seeds 1..10: mean new replicas on the pre-loaded node = 37.3 (uniform expectation 36)
+
+B3: previously failed and recovered node (6 nodes, RF=3, 60 chunks; kill CS1, re-replicate, recover CS1)
+  CS1 physical chunks before kill=26, after recovery=26
+  chunks over-replicated per master (alive replicas > RF): 26 of 60 (max replicas seen on one chunk: 4)
+  chunks under-replicated: 0
+  of a fresh batch of 60 chunks, replicas landing on recovered CS1: 30 (uniform expectation ~30)
+
+Experiment C: targeted failure (10 nodes, RF=3)
+===============================================
+baseline: total=360 min=23 max=41 mean=36.00 imbalance=18 stddev=5.22 | CS1=40 CS10=41 CS2=40 CS3=38 CS4=23 CS5=33 CS6=34 CS7=40 CS8=33 CS9=38
+heaviest=CS10 (41 replicas), lightest=CS4 (23 replicas)
+
+  CS10 | affected=41  underRepl(peak)=41  reRepl start/ok/fail=41/41/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=23 max=41 mean=36.00 imbalance=18 stddev=5.22 | CS1=40 CS10=41 CS2=40 CS3=38 CS4=23 CS5=33 CS6=34 CS7=40 CS8=33 CS9=38
+       post: total=360 min=32 max=48 mean=40.00 imbalance=16 stddev=4.00 | CS1=48 CS2=43 CS3=40 CS4=32 CS5=38 CS6=39 CS7=40 CS8=39 CS9=41
+  CS4  | affected=23  underRepl(peak)=23  reRepl start/ok/fail=23/23/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=23 max=41 mean=36.00 imbalance=18 stddev=5.22 | CS1=40 CS10=41 CS2=40 CS3=38 CS4=23 CS5=33 CS6=34 CS7=40 CS8=33 CS9=38
+       post: total=360 min=35 max=44 mean=40.00 imbalance=9 stddev=3.16 | CS1=44 CS10=41 CS2=43 CS3=42 CS5=35 CS6=37 CS7=43 CS8=36 CS9=39
+
+replicas lost if the heaviest / lightest node dies, mean over seeds 1..10: 43.3 / 26.6
+
+Experiment D: cascading failures (10 nodes, RF=3; no node is ever recovered)
+============================================================================
+
+kill order: [CS2 CS4 CS1]
+  CS2  | affected=40  underRepl(peak)=40  reRepl start/ok/fail=40/40/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=23 max=41 mean=36.00 imbalance=18 stddev=5.22 | CS1=40 CS10=41 CS2=40 CS3=38 CS4=23 CS5=33 CS6=34 CS7=40 CS8=33 CS9=38
+       post: total=360 min=27 max=48 mean=40.00 imbalance=21 stddev=6.20 | CS1=48 CS10=44 CS3=46 CS4=27 CS5=36 CS6=36 CS7=44 CS8=37 CS9=42
+  CS4  | affected=27  underRepl(peak)=27  reRepl start/ok/fail=27/27/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=27 max=48 mean=40.00 imbalance=21 stddev=6.20 | CS1=48 CS10=44 CS3=46 CS4=27 CS5=36 CS6=36 CS7=44 CS8=37 CS9=42
+       post: total=360 min=38 max=54 mean=45.00 imbalance=16 stddev=5.10 | CS1=54 CS10=46 CS3=51 CS5=39 CS6=43 CS7=44 CS8=38 CS9=45
+  CS1  | affected=54  underRepl(peak)=54  reRepl start/ok/fail=54/54/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=38 max=54 mean=45.00 imbalance=16 stddev=5.10 | CS1=54 CS10=46 CS3=51 CS5=39 CS6=43 CS7=44 CS8=38 CS9=45
+       post: total=360 min=43 max=56 mean=51.43 imbalance=13 stddev=4.44 | CS10=53 CS3=56 CS5=43 CS6=56 CS7=52 CS8=47 CS9=53
+  new replicas received (whole sequence): CS1=14 CS10=12 CS3=18 CS4=4 CS5=10 CS6=22 CS7=12 CS8=14 CS9=15
+
+kill order: [CS2 CS4 CS1 CS3 CS5 CS6 CS7 CS8]
+  CS2  | affected=40  underRepl(peak)=40  reRepl start/ok/fail=40/40/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=23 max=41 mean=36.00 imbalance=18 stddev=5.22 | CS1=40 CS10=41 CS2=40 CS3=38 CS4=23 CS5=33 CS6=34 CS7=40 CS8=33 CS9=38
+       post: total=360 min=27 max=48 mean=40.00 imbalance=21 stddev=6.20 | CS1=48 CS10=44 CS3=46 CS4=27 CS5=36 CS6=36 CS7=44 CS8=37 CS9=42
+  CS4  | affected=27  underRepl(peak)=27  reRepl start/ok/fail=27/27/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=27 max=48 mean=40.00 imbalance=21 stddev=6.20 | CS1=48 CS10=44 CS3=46 CS4=27 CS5=36 CS6=36 CS7=44 CS8=37 CS9=42
+       post: total=360 min=38 max=54 mean=45.00 imbalance=16 stddev=5.10 | CS1=54 CS10=46 CS3=51 CS5=39 CS6=43 CS7=44 CS8=38 CS9=45
+  CS1  | affected=54  underRepl(peak)=54  reRepl start/ok/fail=54/54/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=38 max=54 mean=45.00 imbalance=16 stddev=5.10 | CS1=54 CS10=46 CS3=51 CS5=39 CS6=43 CS7=44 CS8=38 CS9=45
+       post: total=360 min=43 max=56 mean=51.43 imbalance=13 stddev=4.44 | CS10=53 CS3=56 CS5=43 CS6=56 CS7=52 CS8=47 CS9=53
+  CS3  | affected=56  underRepl(peak)=56  reRepl start/ok/fail=56/56/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=43 max=56 mean=51.43 imbalance=13 stddev=4.44 | CS10=53 CS3=56 CS5=43 CS6=56 CS7=52 CS8=47 CS9=53
+       post: total=360 min=49 max=69 mean=60.00 imbalance=20 stddev=6.71 | CS10=64 CS5=49 CS6=64 CS7=60 CS8=54 CS9=69
+  CS5  | affected=49  underRepl(peak)=49  reRepl start/ok/fail=49/49/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=49 max=69 mean=60.00 imbalance=20 stddev=6.71 | CS10=64 CS5=49 CS6=64 CS7=60 CS8=54 CS9=69
+       post: total=360 min=65 max=76 mean=72.00 imbalance=11 stddev=3.85 | CS10=74 CS6=74 CS7=71 CS8=65 CS9=76
+  CS6  | affected=74  underRepl(peak)=74  reRepl start/ok/fail=74/74/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=65 max=76 mean=72.00 imbalance=11 stddev=3.85 | CS10=74 CS6=74 CS7=71 CS8=65 CS9=76
+       post: total=360 min=80 max=99 mean=90.00 imbalance=19 stddev=6.75 | CS10=91 CS7=90 CS8=80 CS9=99
+  CS7  | affected=90  underRepl(peak)=90  reRepl start/ok/fail=90/90/0 | detect=4.5s (3 ticks) restored-to-RF=4.5s (3 ticks, achieved=true) finalUnder(master view)=0
+       pre : total=360 min=80 max=99 mean=90.00 imbalance=19 stddev=6.75 | CS10=91 CS7=90 CS8=80 CS9=99
+       post: total=360 min=120 max=120 mean=120.00 imbalance=0 stddev=0.00 | CS10=120 CS8=120 CS9=120
+  CS8  | affected=120 underRepl(peak)=120 reRepl start/ok/fail=0/0/5760 | detect=4.5s (3 ticks) restored-to-RF=1m15s (50 ticks, achieved=false) finalUnder(master view)=120
+       pre : total=360 min=120 max=120 mean=120.00 imbalance=0 stddev=0.00 | CS10=120 CS8=120 CS9=120
+       post: total=240 min=120 max=120 mean=120.00 imbalance=0 stddev=0.00 | CS10=120 CS9=120
+  new replicas received (whole sequence): CS1=14 CS10=79 CS3=18 CS4=4 CS5=16 CS6=40 CS7=50 CS8=87 CS9=82

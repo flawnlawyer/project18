@@ -109,7 +109,10 @@ built "if necessary for a particular experiment."
 
 `uttam-li/dfs`, `merrymercy/goGFS`, and `pixperk/juzfs` were reviewed for
 architectural patterns (manager decomposition, lease-on-demand + version
-bump, operation-log/checkpoint persistence). No code was copied
+bump, operation-log/checkpoint persistence). No code was copied — see chat
+history for the specific patterns pulled from each and where they show up
+here.
+
 ## Next (not started — stop-point per the brief)
 
 M0 demonstrates the milestone sequence end-to-end with tests. Nothing beyond
