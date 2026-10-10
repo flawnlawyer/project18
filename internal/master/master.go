@@ -160,6 +160,37 @@ func (m *Master) IsServerAlive(server common.ServerID) bool {
 	return m.fd.IsAlive(server)
 }
 
+// ChunkState reports handle's derived M2 state (HEALTHY/REPAIRING/DEGRADED/
+// UNDER_REPLICATED). Uses the same optional-interface type-assertion
+// pattern as Unresolved (see below) so the core ReplicationManager
+// interface doesn't have to grow this method for every implementation.
+func (m *Master) ChunkState(handle common.ChunkHandle) ChunkState {
+	if r, ok := m.replication.(interface {
+		State(common.ChunkHandle) ChunkState
+	}); ok {
+		return r.State(handle)
+	}
+	return StateHealthy
+}
+
+// PendingRepairs exposes the repair queue's current backlog, for
+// experiments and the demo.
+func (m *Master) PendingRepairs() []common.ChunkHandle {
+	if r, ok := m.replication.(interface{ Pending() []common.ChunkHandle }); ok {
+		return r.Pending()
+	}
+	return nil
+}
+
+// RepairAttempts reports how many attempts handle's repair job has made so
+// far (0 if none is queued).
+func (m *Master) RepairAttempts(handle common.ChunkHandle) int {
+	if r, ok := m.replication.(interface{ JobAttempts(common.ChunkHandle) int }); ok {
+		return r.JobAttempts(handle)
+	}
+	return 0
+}
+
 // --- Client-facing operations ---
 
 func (m *Master) CreateFile(path common.Path) error {
@@ -294,6 +325,16 @@ func (m *Master) Heartbeat(server common.ServerID, reported map[common.ChunkHand
 	for handle, version := range reported {
 		meta, ok := m.meta.GetChunkMeta(handle)
 		if !ok {
+			// M2 section 7: "Unexpected chunk -> Record for reconciliation
+			// policy." The master has no record of this handle at all.
+			// Deliberately observe-only: M2's scope does not include
+			// garbage collection, so nothing is deleted or requested back
+			// from the chunkserver — see
+			// docs/experiments/M2-distributed-consistency.md.
+			m.log.Logf("MASTER", "%s reported UNEXPECTED chunk %s (v%d) — master has no record of it; recorded, no action taken", server, handle, version)
+			if m.metrics != nil {
+				m.metrics.IncUnexpectedChunk()
+			}
 			continue
 		}
 		switch {
